@@ -6,6 +6,12 @@ Generates malicious ODT (OpenDocument Text) files with embedded LibreOffice Basi
 
 > **For authorized red team / penetration testing engagements only.**
 
+## Install (this tool only)
+
+```bash
+git clone --depth 1 --filter=blob:none --sparse https://github.com/3pdoul/RedTeam-Arsenal.git && cd RedTeam-Arsenal && git sparse-checkout set odt-revshell-generator
+```
+
 ## How It Works
 
 The tool builds a valid ODT file (ZIP archive with ODF XML structure) containing:

@@ -12,6 +12,11 @@ A collection of offensive security tools for authorized red team operations, pen
 
 Generates malicious ODT files with embedded LibreOffice Basic macros that auto-execute a reverse shell on document open.
 
+```bash
+# Download this tool only
+git clone --depth 1 --filter=blob:none --sparse https://github.com/3pdoul/RedTeam-Arsenal.git && cd RedTeam-Arsenal && git sparse-checkout set odt-revshell-generator
+```
+
 - **33 payloads** — 22 Linux + 11 Windows
 - **Linux**: bash, nc (6 variants incl. download-and-execute), ncat, ncat-ssl, socat, python/python3, perl, php, ruby, node, telnet, openssl, awk, lua
 - **Windows**: PowerShell (standard, try-catch, TLS), nc.exe (local + 3 download methods), python, perl, ruby, node
