@@ -239,10 +239,11 @@ socat file:`tty`,raw,echo=0 tcp-listen:4444
 - The `meta:generator` tag is set to `LibreOffice` — modify `META_XML` in the script to customize
 - Document body is an empty page — add decoy content for social engineering
 - Macro is stored in `Basic/Standard/Module1.xml` inside the ODT ZIP
-- Window style is set to `0` (hidden) for all payloads
+- Linux payloads use `Shell "/bin/bash", 0, "..."` (multi-parameter, hidden window)
+- Windows payloads use `Shell("cmd /c ...")` (single-string via cmd.exe) — this is the proven format that works reliably with LibreOffice on Windows
 - `powershell*` payloads use base64 `-e` encoding; `ps-*` payloads use inline `-c` to avoid AMSI's base64 decoding hook
 - `--cmd` on Windows uses inline `-c` (no base64) for shorter, less detectable macros
-- Pre-commands run synchronously (Shell bSync=True) to ensure ordering before the main payload
+- Pre-commands run synchronously via `Shell "cmd.exe", 1, "/c ...", True` to ensure ordering before the main payload
 
 ## Disclaimer
 
